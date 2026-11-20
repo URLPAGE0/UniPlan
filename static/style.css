@@ -85,3 +85,14 @@
 .logout-button:hover{background:#f2f0fb;color:#5651bf}
 @media(max-width:770px){.auth-layout{grid-template-columns:1fr;max-width:480px;min-height:auto}.auth-intro{padding:24px 28px}.auth-brand{font-size:21px}.auth-intro .auth-kicker,.auth-intro h1,.auth-intro p,.auth-decoration,.auth-intro>small{display:none}.auth-form-area{padding:30px 27px 35px}#auth-shell{padding:14px}.auth-card h2{font-size:25px}}
 @media(max-width:720px){.signed-in .sidebar{position:relative;padding-right:75px}.signed-in .profile{display:flex;position:absolute;top:8px;right:14px;border:0;padding:0;margin:0}.signed-in .profile-details,.signed-in .profile .avatar{display:none}.signed-in .logout-button{font-size:22px;padding:7px}}
+
+/* Visible account logout control (desktop and mobile). */
+.header-controls{display:flex;align-items:center;gap:14px}
+.header-logout{border-color:#d8d5ef;color:#514db0;background:#f9f8ff;padding:9px 15px;font-size:12px;font-weight:700}
+.header-logout:hover,.header-logout:focus-visible{background:#eeecfc;border-color:#bcb5ed;color:#4641a7}
+@media(max-width:720px){
+  .header-controls{gap:8px}
+  .header-logout{padding:7px 10px;font-size:11px}
+  header .today{display:none}
+  .signed-in .profile{display:none}
+}
