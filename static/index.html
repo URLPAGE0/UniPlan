@@ -1,8 +1,40 @@
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UniPlan · Your academic workspace</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
-<body>
-<aside class="sidebar"><a class="brand" href="#dashboard"><span class="logo">u<span>·</span></span> UniPlan</a><div class="workspace-label">YOUR WORKSPACE</div><nav aria-label="Main navigation"><a href="#dashboard" data-view="dashboard"><span>◫</span> Overview</a><a href="#tasks" data-view="tasks"><span>☑</span> My tasks</a><a href="#calendar" data-view="calendar"><span>▦</span> Calendar</a><a href="#planner" data-view="planner"><span>◷</span> Study planner</a><a href="#courses" data-view="courses"><span>▤</span> Courses</a><a href="#lectures" data-view="lectures"><span>▧</span> Lecture library</a></nav><div class="sidebar-note"><div class="note-icon">✦</div><strong>A little progress, every day.</strong><p>Make room for what matters. Your next step starts here.</p></div><div class="profile"><span class="avatar">S</span><div><strong>Student workspace</strong><small>SW332 · Sprint 2</small></div></div></aside>
+<body class="signed-out">
+<section id="auth-shell" aria-labelledby="auth-heading">
+  <div class="auth-layout">
+    <div class="auth-intro">
+      <div class="auth-brand"><span class="logo">u<span>·</span></span> UniPlan</div>
+      <span class="auth-kicker">YOUR SEMESTER, SIMPLIFIED</span>
+      <h1>A little more<br>organized.<br><em>A lot more ready.</em></h1>
+      <p>Plan assignments, track deadlines, and study from your own lectures — all in your private academic workspace.</p>
+      <div class="auth-decoration" aria-hidden="true"><span>✓</span><span>▦</span><span>✦</span></div>
+      <small>Independent student project · SW332</small>
+    </div>
+    <div class="auth-form-area">
+      <div class="auth-card">
+        <div class="eyebrow">WELCOME TO UNIPLAN</div>
+        <h2 id="auth-heading">Welcome back</h2>
+        <p id="auth-description">Sign in to continue planning your semester.</p>
+        <div class="auth-tabs" role="group" aria-label="Choose account action">
+          <button type="button" id="auth-tab-login" data-auth-mode="login" class="active" aria-pressed="true">Sign in</button>
+          <button type="button" id="auth-tab-register" data-auth-mode="register" aria-pressed="false">Create account</button>
+        </div>
+        <form id="auth-form">
+          <label id="auth-name-row" hidden>Full name<input name="name" type="text" autocomplete="name" minlength="2" maxlength="100" placeholder="Your full name"></label>
+          <label>Email address<input name="email" type="email" autocomplete="username" maxlength="254" required placeholder="you@example.com"></label>
+          <label>Password<input name="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required placeholder="At least 10 characters"></label>
+          <label id="auth-confirm-row" hidden>Confirm password<input name="confirm" type="password" autocomplete="new-password" minlength="10" maxlength="128" placeholder="Re-enter your password"></label>
+          <p id="auth-error" class="auth-error" role="alert" aria-live="polite"></p>
+          <button class="button primary auth-submit" id="auth-submit" type="submit">Sign in</button>
+        </form>
+        <p class="auth-footnote">Your personal courses, tasks, and lecture files are available only in your account. Use a unique password.</p>
+      </div>
+    </div>
+  </div>
+</section>
+<aside class="sidebar"><a class="brand" href="#dashboard"><span class="logo">u<span>·</span></span> UniPlan</a><div class="workspace-label">YOUR WORKSPACE</div><nav aria-label="Main navigation"><a href="#dashboard" data-view="dashboard"><span>◫</span> Overview</a><a href="#tasks" data-view="tasks"><span>☑</span> My tasks</a><a href="#calendar" data-view="calendar"><span>▦</span> Calendar</a><a href="#planner" data-view="planner"><span>◷</span> Study planner</a><a href="#courses" data-view="courses"><span>▤</span> Courses</a><a href="#lectures" data-view="lectures"><span>▧</span> Lecture library</a></nav><div class="sidebar-note"><div class="note-icon">✦</div><strong>A little progress, every day.</strong><p>Make room for what matters. Your next step starts here.</p></div><div class="profile"><span class="avatar" id="profile-avatar">S</span><div class="profile-details"><strong id="profile-name">Student</strong><small id="profile-email">Private workspace</small></div><button type="button" id="logout-button" class="icon-button logout-button" title="Log out" aria-label="Log out">↪</button></div></aside>
 <div class="app"><header><div class="breadcrumb">Workspace <span>/</span> <strong id="breadcrumb">Overview</strong></div><div class="today" id="today"></div></header><main id="main"></main><footer>Blackboard UniPlan <span>Independent student project · Local workspace</span></footer></div>
 <dialog id="task-dialog"><form id="task-form"><div class="dialog-heading"><div><div class="eyebrow">PLAN YOUR NEXT STEP</div><h2 id="task-dialog-title">New task</h2></div><button type="button" class="icon-button" data-close aria-label="Close">×</button></div><label>Task title<input name="title" required maxlength="150" placeholder="e.g. Prepare sprint review presentation"></label><div class="form-grid"><label>Course<select name="course_id" required></select></label><label>Type<select name="kind"><option>Assignment</option><option>Exam</option></select></label><label>Due date<input type="date" name="due_date" required></label><label>Priority<select name="priority"><option>Medium</option><option>High</option><option>Low</option></select></label></div><label>Notes <span class="muted">(optional)</span><textarea name="notes" maxlength="2000" rows="3" placeholder="What do you need to remember?"></textarea></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="button secondary">Cancel</button><button class="button primary" type="submit">Save task</button></div></form></dialog>
 <dialog id="course-dialog"><form id="course-form"><div class="dialog-heading"><h2>Add a course</h2><button type="button" class="icon-button" data-close aria-label="Close">×</button></div><label>Course code<input name="code" maxlength="20" required placeholder="SW332"></label><label>Course name<input name="name" maxlength="100" required placeholder="Agile Software Construction"></label><label>Course color<input type="color" name="color" value="#6663d5"></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button class="button secondary" type="button" data-close>Cancel</button><button class="button primary" type="submit">Add course</button></div></form></dialog>

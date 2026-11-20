@@ -1,5 +1,6 @@
 'use strict';
 let state = {courses: [], tasks: [], lectures: []};
+let signedInUser = null, authMode = 'login';
 let view = 'dashboard', editing = null, deleting = null, activeLecture = null;
 let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1), selectedCalendarDay = localIso(new Date());
 let planSettings = {days: 14, minutes: 90}, activePlan = null;
@@ -19,7 +20,10 @@ async function api(path, method='GET', body) {
   else if (body !== undefined) {init.body = JSON.stringify(body); init.headers = {'Content-Type':'application/json'};}
   const response = await fetch('/api'+path, init);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Something went wrong. Please try again.');
+  if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/auth/')) setAuthUI(null);
+    throw new Error(data.error || 'Something went wrong. Please try again.');
+  }
   return data;
 }
 async function refresh() { state = await api('/state'); render(); }
@@ -39,8 +43,7 @@ function overview() {
   return heading('Your academic overview', 'A clear mind starts with a clear plan.', newTaskButton)+
   `<section class="hero"><div><div class="eyebrow">A LITTLE MORE ORGANIZED. A LOT MORE READY.</div><h2>Big goals. Small steps.</h2><p>Keep your coursework in focus and your deadlines in sight.<br>Let’s make today a productive one.</p></div><div class="hero-art" aria-hidden="true"><div class="art-paper"><i></i><i></i><i></i><i></i><i></i></div><span class="spark">✦</span><div class="art-check">✓</div></div></section>`+
   `<div class="stats">${[['Active courses',state.courses.length,'Your subjects this semester','▤'],['Pending tasks',pending.length,'One step at a time','◷'],['Completed tasks',completed,'Progress worth celebrating','✓'],['Due this week',soon,'Today and the next 7 days','▦']].map(([label,n,sub,icon])=>`<div class="stat"><div class="stat-top">${label}<span class="stat-icon">${icon}</span></div><div class="stat-value">${n}</div><small>${sub}</small></div>`).join('')}</div>`+
-  `<div class="two-col"><div><section class="panel"><div class="panel-heading"><h2>Upcoming tasks <span class="muted">· ${pending.length}</span></h2><a href="#tasks" class="text-link">View all tasks →</a></div>${pending.length?pending.slice(0,5).map(taskRow).join(''):empty('You’re all caught up', 'Add an assignment or exam to plan your next step.',newTaskButton)}</section><section class="panel section-space"><div class="panel-heading"><h2>Your lecture library</h2><a class="text-link" href="#lectures">Open library →</a></div>${state.lectures.length?state.lectures.slice(0,2).map(l=>`<div class="course-row"><span class="course-symbol" style="--course-color:#c57564">▧</span><div><strong>${escapeHTML(l.filename)}</strong><p>${escapeHTML(course(l.course_id).code)} · ${l.pages} pages</p></div></div>`).join(''):empty('A home for your lecture notes', 'Upload a PDF and turn it into a short, source-linked summary.','<button class="button secondary" data-action="upload">Upload lecture</button>')}</section></div><div class="side-stack"><section class="panel"><div class="panel-heading"><h2>My courses</h2><button class="text-link" data-action="new-course">＋ Add</button></div>${state.courses.length?state.courses.slice(0,4).map(courseRow).join(''):empty('Start with a course','Add your subjects to organize tasks.','<button class="button secondary" data-action="new-course">Add course</button>')}</section><section class="progress-panel"><h2>Keep the momentum</h2><div class="progress-heading"><span>Overall task progress</span><strong>${percent}%</strong></div><div class="progress-track"><span style="width:${percent}%"></span></div><p>${completed} of ${state.tasks.length} tasks complete. Every small step counts.</p></section></div></div>`+
-  (!state.courses.length?'<div class="info load-demo">Want to explore first? <button class="text-link" data-action="demo">Load sample courses and tasks →</button><br><small>Optional demo data. You can also start by adding your own courses.</small></div>':'');
+  `<div class="two-col"><div><section class="panel"><div class="panel-heading"><h2>Upcoming tasks <span class="muted">· ${pending.length}</span></h2><a href="#tasks" class="text-link">View all tasks →</a></div>${pending.length?pending.slice(0,5).map(taskRow).join(''):empty('You’re all caught up', 'Add an assignment or exam to plan your next step.',newTaskButton)}</section><section class="panel section-space"><div class="panel-heading"><h2>Your lecture library</h2><a class="text-link" href="#lectures">Open library →</a></div>${state.lectures.length?state.lectures.slice(0,2).map(l=>`<div class="course-row"><span class="course-symbol" style="--course-color:#c57564">▧</span><div><strong>${escapeHTML(l.filename)}</strong><p>${escapeHTML(course(l.course_id).code)} · ${l.pages} pages</p></div></div>`).join(''):empty('A home for your lecture notes', 'Upload a PDF and turn it into a short, source-linked summary.','<button class="button secondary" data-action="upload">Upload lecture</button>')}</section></div><div class="side-stack"><section class="panel"><div class="panel-heading"><h2>My courses</h2><button class="text-link" data-action="new-course">＋ Add</button></div>${state.courses.length?state.courses.slice(0,4).map(courseRow).join(''):empty('Start with a course','Add your subjects to organize tasks.','<button class="button secondary" data-action="new-course">Add course</button>')}</section><section class="progress-panel"><h2>Keep the momentum</h2><div class="progress-heading"><span>Overall task progress</span><strong>${percent}%</strong></div><div class="progress-track"><span style="width:${percent}%"></span></div><p>${completed} of ${state.tasks.length} tasks complete. Every small step counts.</p></section></div></div>`;
 }
 function filteredTasks() {return state.tasks.filter(t => (!filters.search || (t.title+' '+t.notes+' '+course(t.course_id).code).toLowerCase().includes(filters.search.toLowerCase())) && (!filters.course || t.course_id===Number(filters.course)) && (filters.status==='all'||(filters.status==='completed'?!!t.completed:!t.completed)) && (!filters.kind||t.kind===filters.kind));}
 function taskResults() {const tasks=filteredTasks(); return tasks.length?tasks.map(taskRow).join(''):empty('No tasks here yet','Add a task, or change your filters to see more.', newTaskButton);}
@@ -149,7 +152,6 @@ document.addEventListener('click', async e=>{
     if(b.dataset.action==='new-task')openTask();
     if(b.dataset.action==='new-course')openCourse();
     if(b.dataset.action==='upload')openUpload();
-    if(b.dataset.action==='demo'){b.disabled=true;await api('/demo','POST',{});await refresh();toast('Sample workspace loaded.');}
     if(b.dataset.edit)openTask(Number(b.dataset.edit));
     if(b.dataset.deleteTask)confirmDelete('tasks',Number(b.dataset.deleteTask));
     if(b.dataset.deleteLecture)confirmDelete('lectures',Number(b.dataset.deleteLecture));
@@ -170,6 +172,80 @@ document.addEventListener('change',async e=>{
   if(e.target.id==='plan-days'||e.target.id==='plan-minutes'){planSettings[e.target.id==='plan-days'?'days':'minutes']=Number(e.target.value);loadPlan();}
 });
 document.addEventListener('input',e=>{if(e.target.id==='search'){filters.search=e.target.value;$('#task-results').innerHTML=taskResults();}});
-window.addEventListener('hashchange',render);
-$('#today').textContent=new Date().toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric',year:'numeric'});
-refresh().catch(e=>{$('#main').innerHTML=empty('Could not load your workspace',escapeHTML(e.message),'<button class="button primary" onclick="location.reload()">Try again</button>');});
+window.addEventListener('hashchange',()=>{if(signedInUser)render();});
+function setAuthUI(user) {
+  signedInUser = user;
+  document.body.classList.toggle('signed-in', !!user);
+  document.body.classList.toggle('signed-out', !user);
+  if (user) {
+    $('#profile-name').textContent = user.name;
+    $('#profile-email').textContent = user.email;
+    $('#profile-avatar').textContent = user.name.charAt(0).toUpperCase();
+  } else {
+    state = {courses: [], tasks: [], lectures: []};
+    activePlan = null;
+    $('#main').replaceChildren();
+    for (const dlg of document.querySelectorAll('dialog')) if (dlg.open) dlg.close();
+  }
+}
+function chooseAuthMode(mode) {
+  authMode = mode;
+  const register = mode === 'register';
+  $('#auth-heading').textContent = register ? 'Create your account' : 'Welcome back';
+  $('#auth-description').textContent = register ? 'Start a new private academic workspace.' : 'Sign in to continue planning your semester.';
+  $('#auth-name-row').hidden = !register;
+  $('#auth-confirm-row').hidden = !register;
+  $('#auth-form').elements.name.required = register;
+  $('#auth-form').elements.confirm.required = register;
+  $('#auth-form').elements.password.autocomplete = register ? 'new-password' : 'current-password';
+  $('#auth-submit').textContent = register ? 'Create account' : 'Sign in';
+  $('#auth-error').textContent = '';
+  for (const m of ['login', 'register']) {
+    const button = $('#auth-tab-' + m);
+    button.classList.toggle('active', m === mode);
+    button.setAttribute('aria-pressed', String(m === mode));
+  }
+}
+document.querySelectorAll('[data-auth-mode]').forEach(button => button.addEventListener('click', () => chooseAuthMode(button.dataset.authMode)));
+$('#auth-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const form = e.currentTarget, submit = $('#auth-submit');
+  const name = form.elements.name.value.trim();
+  const email = form.elements.email.value.trim();
+  const password = form.elements.password.value;
+  if (authMode === 'register' && password !== form.elements.confirm.value) {
+    $('#auth-error').textContent = 'Passwords do not match.';return;
+  }
+  submit.disabled = true;
+  submit.textContent = 'Please wait…';
+  $('#auth-error').textContent = '';
+  try {
+    const result = await api(authMode === 'register' ? '/auth/register' : '/auth/login', 'POST',
+      authMode === 'register' ? {name,email,password} : {email,password});
+    form.reset();
+    setAuthUI(result.user);
+    await refresh();
+    toast(authMode === 'register' ? 'Account created. Your workspace is ready.' : 'Welcome back!');
+  } catch(error) { $('#auth-error').textContent = error.message; }
+  finally { submit.disabled = false; submit.textContent = authMode === 'register' ? 'Create account' : 'Sign in'; }
+});
+$('#logout-button').addEventListener('click', async e => {
+  const button = e.currentTarget;
+  button.disabled = true;
+  try {
+    await api('/auth/logout', 'POST', {});
+    setAuthUI(null);
+    $('#auth-form').reset();
+    chooseAuthMode('login');
+    toast('You have signed out.');
+  } catch(error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+$('#today').textContent = new Date().toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+(async function startup() {
+  try {
+    const result = await api('/auth/me');
+    setAuthUI(result.authenticated ? result.user : null);
+    if (result.authenticated) await refresh();
+  } catch(error) { $('#auth-error').textContent = 'Unable to connect to UniPlan: '+error.message; }
+})();

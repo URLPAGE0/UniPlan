@@ -1,4 +1,4 @@
-"""UniPlan Sprint 2. Run: python app.py. Local, single-user application."""
+"""Blackboard UniPlan: Sprint 2 + account isolation. Run: python app.py."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -6,6 +6,8 @@ from email.parser import BytesParser
 from email.policy import default
 from datetime import date, timedelta
 from collections import Counter
+from http.cookies import SimpleCookie
+import time
 import argparse
 import io
 import json
@@ -15,6 +17,9 @@ import sqlite3
 import uuid
 from pypdf import PdfReader
 from study_features import answer_question, make_practice_questions, study_plan, to_csv
+from auth import (SESSION_COOKIE, SESSION_SECONDS, DUMMY_HASH, normal_email, valid_name,
+                  valid_password, hash_password, verify_password, create_session,
+                  get_user, revoke_session, login_limiter, register_limiter)
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get('UNIPLAN_DATA_DIR', ROOT / 'data'))
@@ -22,7 +27,7 @@ MAX_UPLOAD = 10 * 1024 * 1024
 
 
 def connect():
-    db = sqlite3.connect(DATA / 'uniplan.sqlite3')
+    db = sqlite3.connect(DATA / 'uniplan_accounts.sqlite3', timeout=10)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA foreign_keys=ON')
     return db
@@ -33,15 +38,25 @@ def init_db():
     (DATA / 'uploads').mkdir(exist_ok=True)
     with connect() as db:
         db.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (
+          token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          expires_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE TABLE IF NOT EXISTS courses (
-          id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE COLLATE NOCASE,
-          name TEXT NOT NULL, color TEXT NOT NULL);
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          code TEXT NOT NULL COLLATE NOCASE, name TEXT NOT NULL, color TEXT NOT NULL,
+          UNIQUE(user_id, code));
         CREATE TABLE IF NOT EXISTS tasks (
-          id INTEGER PRIMARY KEY, title TEXT NOT NULL, course_id INTEGER NOT NULL REFERENCES courses(id),
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title TEXT NOT NULL, course_id INTEGER NOT NULL REFERENCES courses(id),
           kind TEXT NOT NULL, due_date TEXT NOT NULL, priority TEXT NOT NULL,
           notes TEXT NOT NULL DEFAULT '', completed INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS lectures (
-          id INTEGER PRIMARY KEY, filename TEXT NOT NULL, stored_name TEXT NOT NULL,
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          filename TEXT NOT NULL, stored_name TEXT NOT NULL,
           course_id INTEGER NOT NULL REFERENCES courses(id), pages INTEGER NOT NULL,
           extracted TEXT NOT NULL, summary TEXT);
         ''')
@@ -53,15 +68,15 @@ def clean_string(value, name, limit=200):
     return value.strip()
 
 
-def course_exists(db, value):
-    if isinstance(value, bool) or not isinstance(value, int) or not db.execute('SELECT id FROM courses WHERE id=?', (value,)).fetchone():
+def course_exists(db, value, uid):
+    if isinstance(value, bool) or not isinstance(value, int) or not db.execute('SELECT id FROM courses WHERE id=? AND user_id=?', (value, uid)).fetchone():
         raise ValueError('Choose an existing course.')
     return value
 
 
-def task_values(db, body):
+def task_values(db, body, uid):
     title = clean_string(body.get('title'), 'Title', 150)
-    course = course_exists(db, body.get('course_id'))
+    course = course_exists(db, body.get('course_id'), uid)
     kind, priority = body.get('kind'), body.get('priority')
     if kind not in ('Assignment', 'Exam') or priority not in ('High', 'Medium', 'Low'):
         raise ValueError('Select a valid task type and priority.')
@@ -107,18 +122,43 @@ def summarize(pages):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def send(self, code, payload, content_type='application/json; charset=utf-8'):
+    def send(self, code, payload, content_type='application/json; charset=utf-8', cookie=None):
         data = json.dumps(payload).encode() if content_type.startswith('application/json') else payload
         self.send_response(code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Referrer-Policy', 'same-origin')
+        if os.environ.get('UNIPLAN_COOKIE_SECURE') == '1':
+            self.send_header('Strict-Transport-Security', 'max-age=31536000')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        if cookie:
+            self.send_header('Set-Cookie', cookie)
         if content_type.startswith('text/csv'):
             filename = 'uniplan-study-plan.csv' if 'study-plan' in self.path else 'uniplan-tasks.csv'
             self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(data)
+
+    def session_cookie(self, token, clear=False):
+        # Public HTTPS deployments MUST set UNIPLAN_COOKIE_SECURE=1.
+        secure = '; Secure' if os.environ.get('UNIPLAN_COOKIE_SECURE') == '1' else ''
+        if clear:
+            return f'{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}'
+        return f'{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_SECONDS}{secure}'
+
+    def cookie_token(self):
+        raw = self.headers.get('Cookie', '')
+        if len(raw) > 8192:
+            return None
+        try:
+            cookie = SimpleCookie()
+            cookie.load(raw)
+            return cookie[SESSION_COOKIE].value if SESSION_COOKIE in cookie else None
+        except Exception:
+            return None
 
     def do_GET(self):
         self.handle_request('GET')
@@ -142,6 +182,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(size)
 
     def json_body(self):
+        if not self.headers.get('Content-Type', '').split(';')[0].strip().lower() == 'application/json':
+            raise ValueError('Send an application/json request.')
+        if int(self.headers.get('Content-Length','0')) > 16384:
+            raise ValueError('JSON request is too large.')
         try:
             data = json.loads(self.body())
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -163,11 +207,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def dispatch(self, method):
         path = urlparse(self.path).path
-        # Browser writes must come from this local application.
+        # Protect cookie-based writes from cross-site requests.
         if method != 'GET':
             origin = self.headers.get('Origin')
             if origin and urlparse(origin).netloc != self.headers.get('Host'):
                 return self.send(403, {'error': 'Cross-origin writes are not allowed.'})
+            if self.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site':
+                return self.send(403, {'error': 'Cross-site requests are not allowed.'})
         if method == 'GET' and not path.startswith('/api/'):
             files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
             if path not in files:
@@ -175,11 +221,62 @@ class Handler(BaseHTTPRequestHandler):
             name, mime = files[path]
             return self.send(200, (ROOT / 'static' / name).read_bytes(), mime)
         with connect() as db:
+            token = self.cookie_token()
+            user = get_user(db, token)
+            if path == '/api/auth/me' and method == 'GET':
+                return self.send(200, {'authenticated': bool(user), 'user': user})
+            if path == '/api/auth/register' and method == 'POST':
+                if user:
+                    return self.send(409, {'error': 'Log out before creating another account.'})
+                key = 'register:' + self.client_address[0]
+                if not register_limiter.allow(key, max_attempts=10, window=3600):
+                    return self.send(429, {'error': 'Too many registration attempts. Please try again later.'})
+                register_limiter.record(key)
+                b = self.json_body()
+                name, email, password = valid_name(b.get('name')), normal_email(b.get('email')), valid_password(b.get('password'))
+                if db.execute('SELECT 1 FROM users WHERE email=?', (email,)).fetchone():
+                    return self.send(409, {'error': 'An account already exists with this email.'})
+                try:
+                    result = db.execute('INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)',
+                                        (name, email, hash_password(password), int(time.time())))
+                except sqlite3.IntegrityError:
+                    return self.send(409, {'error': 'An account already exists with this email.'})
+                login_token = create_session(db, result.lastrowid)
+                db.commit()
+                return self.send(201, {'authenticated': True, 'user': {'id': result.lastrowid, 'name': name, 'email': email}},
+                                 cookie=self.session_cookie(login_token))
+            if path == '/api/auth/login' and method == 'POST':
+                b = self.json_body()
+                email = normal_email(b.get('email'))
+                password = b.get('password')
+                if not isinstance(password, str):
+                    raise ValueError('Enter your password.')
+                key = 'login:' + self.client_address[0] + ':' + email
+                if not login_limiter.allow(key):
+                    return self.send(429, {'error': 'Too many failed login attempts. Please try again later.'})
+                row = db.execute('SELECT id,name,email,password_hash FROM users WHERE email=?', (email,)).fetchone()
+                if not verify_password(password, row['password_hash'] if row else DUMMY_HASH) or not row:
+                    login_limiter.record(key)
+                    return self.send(401, {'error': 'Incorrect email or password.'})
+                login_limiter.clear(key)
+                revoke_session(db, token)
+                login_token = create_session(db, row['id'])
+                db.commit()
+                return self.send(200, {'authenticated': True, 'user': {'id': row['id'], 'name': row['name'], 'email': row['email']}},
+                                 cookie=self.session_cookie(login_token))
+            if path == '/api/auth/logout' and method == 'POST':
+                revoke_session(db, token)
+                db.commit()
+                return self.send(200, {'ok': True}, cookie=self.session_cookie('', clear=True))
+            if not user:
+                return self.send(401, {'error': 'Please sign in to access your workspace.'})
+            uid = user['id']
             if path == '/api/state' and method == 'GET':
-                return self.send(200, {table: [dict(row) for row in db.execute(sql)] for table, sql in {
-                    'courses': 'SELECT * FROM courses ORDER BY code',
-                    'tasks': 'SELECT * FROM tasks ORDER BY due_date, id',
-                    'lectures': 'SELECT id,filename,course_id,pages,summary FROM lectures ORDER BY id DESC'}.items()})
+                return self.send(200, {
+                    'courses': [dict(row) for row in db.execute('SELECT id,code,name,color FROM courses WHERE user_id=? ORDER BY code', (uid,))],
+                    'tasks': [dict(row) for row in db.execute('SELECT id,title,course_id,kind,due_date,priority,notes,completed FROM tasks WHERE user_id=? ORDER BY due_date,id', (uid,))],
+                    'lectures': [dict(row) for row in db.execute('SELECT id,filename,course_id,pages,summary FROM lectures WHERE user_id=? ORDER BY id DESC', (uid,))]
+                })
             if path == '/api/study-plan' and method == 'GET':
                 from urllib.parse import parse_qs
                 query = parse_qs(urlparse(self.path).query)
@@ -188,12 +285,13 @@ class Handler(BaseHTTPRequestHandler):
                     minutes = int(query.get('minutes', ['90'])[0])
                 except ValueError:
                     raise ValueError('Study plan parameters must be numbers.')
-                tasks = [dict(t) for t in db.execute('SELECT * FROM tasks ORDER BY due_date,id')]
-                courses = [dict(c) for c in db.execute('SELECT * FROM courses')]
+                tasks = [dict(t) for t in db.execute('SELECT * FROM tasks WHERE user_id=? ORDER BY due_date,id', (uid,))]
+                courses = [dict(c) for c in db.execute('SELECT * FROM courses WHERE user_id=?', (uid,))]
                 return self.send(200, study_plan(tasks, courses, days, minutes))
             if path == '/api/export/tasks.csv' and method == 'GET':
                 rows = db.execute('''SELECT t.title, c.code, t.kind, t.due_date, t.priority, t.notes, t.completed
-                     FROM tasks t JOIN courses c ON t.course_id=c.id ORDER BY t.due_date,t.id''')
+                     FROM tasks t JOIN courses c ON t.course_id=c.id
+                     WHERE t.user_id=? AND c.user_id=? ORDER BY t.due_date,t.id''', (uid, uid))
                 csv_rows = [(r['title'], r['code'], r['kind'], r['due_date'], r['priority'],
                              'Completed' if r['completed'] else 'Pending', r['notes']) for r in rows]
                 return self.send(200, to_csv(['Task', 'Course', 'Type', 'Due date', 'Priority', 'Status', 'Notes'], csv_rows), 'text/csv; charset=utf-8')
@@ -205,41 +303,33 @@ class Handler(BaseHTTPRequestHandler):
                     minutes = int(query.get('minutes', ['90'])[0])
                 except ValueError:
                     raise ValueError('Study plan parameters must be numbers.')
-                plan = study_plan([dict(t) for t in db.execute('SELECT * FROM tasks')],
-                                  [dict(c) for c in db.execute('SELECT * FROM courses')], days, minutes)
+                plan = study_plan([dict(t) for t in db.execute('SELECT * FROM tasks WHERE user_id=?', (uid,))],
+                                  [dict(c) for c in db.execute('SELECT * FROM courses WHERE user_id=?', (uid,))], days, minutes)
                 csv_rows = [(r['date'], r['course'], r['title'], r['kind'], r['priority'],
                              r['minutes'], r['due_date'], 'Yes' if r['overdue'] else 'No') for r in plan['sessions']]
                 return self.send(200, to_csv(['Study date', 'Course', 'Task', 'Type', 'Priority', 'Minutes', 'Due date', 'Overdue'], csv_rows), 'text/csv; charset=utf-8')
-            if path == '/api/demo' and method == 'POST':
-                if any(db.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone() for table in ('courses', 'tasks', 'lectures')):
-                    return self.send(409, {'error': 'Demo data can only be loaded into an empty workspace.'})
-                for code, name, color in [('SW332', 'Agile Software Construction', '#6663d5'), ('CS240', 'Database Systems', '#2a927d'), ('CS310', 'Software Engineering', '#ce8944')]:
-                    db.execute('INSERT INTO courses(code,name,color) VALUES(?,?,?)', (code, name, color))
-                for title, course, kind, days, priority, done in [('Sprint review preparation', 1, 'Assignment', 2, 'High', 0), ('Database design exercise', 2, 'Assignment', 4, 'Medium', 0), ('Midterm examination', 3, 'Exam', 7, 'High', 0), ('Product vision statement', 1, 'Assignment', -2, 'Low', 1)]:
-                    db.execute('INSERT INTO tasks(title,course_id,kind,due_date,priority,completed) VALUES(?,?,?,?,?,?)', (title, course, kind, (date.today()+timedelta(days=days)).isoformat(), priority, done))
-                return self.send(201, {'ok': True})
             if path == '/api/courses' and method == 'POST':
                 b = self.json_body()
                 code, name = clean_string(b.get('code'), 'Course code', 20), clean_string(b.get('name'), 'Course name', 100)
                 color = b.get('color', '#6663d5')
                 if not isinstance(color, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
                     raise ValueError('Select a valid course color.')
-                result = db.execute('INSERT INTO courses(code,name,color) VALUES(?,?,?)', (code.upper(), name, color))
+                result = db.execute('INSERT INTO courses(user_id,code,name,color) VALUES(?,?,?,?)', (uid, code.upper(), name, color))
                 return self.send(201, {'id': result.lastrowid})
             if path == '/api/tasks' and method == 'POST':
-                values = task_values(db, self.json_body())
-                result = db.execute('INSERT INTO tasks(title,course_id,kind,due_date,priority,notes,completed) VALUES(?,?,?,?,?,?,?)', values)
+                values = task_values(db, self.json_body(), uid)
+                result = db.execute('INSERT INTO tasks(user_id,title,course_id,kind,due_date,priority,notes,completed) VALUES(?,?,?,?,?,?,?,?)', (uid, *values))
                 return self.send(201, {'id': result.lastrowid})
             match = re.fullmatch(r'/api/tasks/(\d+)', path)
             if match and method in ('PUT', 'DELETE'):
                 tid = int(match[1])
-                if not db.execute('SELECT id FROM tasks WHERE id=?', (tid,)).fetchone():
+                if not db.execute('SELECT id FROM tasks WHERE id=? AND user_id=?', (tid, uid)).fetchone():
                     return self.send(404, {'error': 'Task not found.'})
                 if method == 'DELETE':
-                    db.execute('DELETE FROM tasks WHERE id=?', (tid,))
+                    db.execute('DELETE FROM tasks WHERE id=? AND user_id=?', (tid, uid))
                 else:
-                    values = task_values(db, self.json_body())
-                    db.execute('UPDATE tasks SET title=?,course_id=?,kind=?,due_date=?,priority=?,notes=?,completed=? WHERE id=?', (*values, tid))
+                    values = task_values(db, self.json_body(), uid)
+                    db.execute('UPDATE tasks SET title=?,course_id=?,kind=?,due_date=?,priority=?,notes=?,completed=? WHERE id=? AND user_id=?', (*values, tid, uid))
                 return self.send(200, {'ok': True})
             if path == '/api/lectures' and method == 'POST':
                 content_type = self.headers.get('Content-Type', '')
@@ -253,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
                     cid = int(parts['course_id'].get_payload(decode=True))
                 except (ValueError, TypeError):
                     raise ValueError('Select a course.')
-                course_exists(db, cid)
+                course_exists(db, cid, uid)
                 name = (parts['file'].get_filename() or '').replace('\\', '/').split('/')[-1]
                 raw = parts['file'].get_payload(decode=True)
                 if not name.lower().endswith('.pdf') or not raw or not raw.startswith(b'%PDF-'):
@@ -276,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
                 stored = uuid.uuid4().hex+'.pdf'
                 (DATA / 'uploads' / stored).write_bytes(raw)
                 try:
-                    result = db.execute('INSERT INTO lectures(filename,stored_name,course_id,pages,extracted) VALUES(?,?,?,?,?)', (name[:200], stored, cid, len(pages), json.dumps(pages)))
+                    result = db.execute('INSERT INTO lectures(user_id,filename,stored_name,course_id,pages,extracted) VALUES(?,?,?,?,?,?)', (uid, name[:200], stored, cid, len(pages), json.dumps(pages)))
                 except Exception:
                     (DATA / 'uploads' / stored).unlink(missing_ok=True)
                     raise
@@ -284,12 +374,12 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r'/api/lectures/(\d+)(/summary|/file|/ask|/questions)?', path)
             if match:
                 lid, action = int(match[1]), match[2]
-                lecture = db.execute('SELECT * FROM lectures WHERE id=?', (lid,)).fetchone()
+                lecture = db.execute('SELECT * FROM lectures WHERE id=? AND user_id=?', (lid, uid)).fetchone()
                 if not lecture:
                     return self.send(404, {'error': 'Lecture not found.'})
                 if method == 'POST' and action == '/summary':
                     summary = summarize(json.loads(lecture['extracted']))
-                    db.execute('UPDATE lectures SET summary=? WHERE id=?', (json.dumps(summary), lid))
+                    db.execute('UPDATE lectures SET summary=? WHERE id=? AND user_id=?', (json.dumps(summary), lid, uid))
                     return self.send(200, {'summary': summary})
                 if method == 'POST' and action == '/ask':
                     body = self.json_body()
@@ -301,7 +391,7 @@ class Handler(BaseHTTPRequestHandler):
                 if method == 'GET' and action == '/file':
                     return self.send(200, (DATA / 'uploads' / lecture['stored_name']).read_bytes(), 'application/pdf')
                 if method == 'DELETE' and not action:
-                    db.execute('DELETE FROM lectures WHERE id=?', (lid,))
+                    db.execute('DELETE FROM lectures WHERE id=? AND user_id=?', (lid, uid))
                     db.commit()
                     (DATA / 'uploads' / lecture['stored_name']).unlink(missing_ok=True)
                     return self.send(200, {'ok': True})
@@ -310,12 +400,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description='Run UniPlan locally')
-    parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', '8000')))
+    parser.add_argument('--host', default=os.environ.get('UNIPLAN_HOST', '127.0.0.1'), help='Bind address; set 0.0.0.0 only behind a trusted HTTPS host')
     parser.add_argument('--open-browser', action='store_true', help='Open the application in your default browser')
     args = parser.parse_args()
     init_db()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
-    print(f'UniPlan is running at http://127.0.0.1:{args.port} — Ctrl+C to stop.', flush=True)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f'UniPlan is listening on {args.host}:{args.port} — Ctrl+C to stop.', flush=True)
     if args.open_browser:
         import threading
         import webbrowser
