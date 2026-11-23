@@ -96,3 +96,26 @@
   header .today{display:none}
   .signed-in .profile{display:none}
 }
+
+/* Sprint 2: reminders, saved study materials, quizzes and editing */
+.lecture-search-panel{padding:17px 20px;margin-bottom:20px}
+.lecture-search-panel label{margin:0;max-width:620px}
+.lecture-search-panel input{font-size:13px}
+#lecture-search-results:empty{display:none}
+.saved-list{padding:14px 20px;min-height:50px}
+.saved-layout{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.saved-entry{padding:13px 0;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.saved-entry:last-child{border-bottom:0}
+.saved-entry strong{font-size:12px}.saved-entry p{color:var(--muted);font-size:12px;margin:5px 0}
+.saved-entry a:not(.button){font-size:11px;color:var(--purple)}
+.saved-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex-shrink:0}
+.reminder-status{background:#fff3e5;color:#a36b2b;font-size:11px;padding:5px 8px;border-radius:6px;white-space:nowrap}
+.reminder-status.is-overdue{color:#a83d48;background:#ffecef}
+.score-pill{background:#eae8fa;border-radius:7px;color:#5c55b5;padding:8px 11px;font-weight:700;white-space:nowrap}
+.quiz-score{background:#efedfa;border-radius:9px;padding:14px 18px;margin:14px 0}
+.quiz-score strong{font-size:17px;color:var(--purple)}.quiz-score p{margin-bottom:0;color:var(--muted)}
+.mini-edit{font-size:11px;padding:6px 9px;margin-left:auto;flex-shrink:0}
+.study-session{flex-wrap:wrap}.study-session>div{flex:1;min-width:150px}
+#note-list,#bookmark-list{margin-top:12px}.saved-list>.muted{margin:6px 0}
+@media(max-width:880px){.saved-layout{grid-template-columns:1fr}}
+@media(max-width:520px){.saved-entry{align-items:flex-start;flex-direction:column;gap:6px}.saved-actions{width:100%}.mini-edit{margin-left:0}.saved-layout{grid-template-columns:1fr}}

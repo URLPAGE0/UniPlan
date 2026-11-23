@@ -17,6 +17,7 @@ import sqlite3
 import uuid
 from pypdf import PdfReader
 from study_features import answer_question, make_practice_questions, study_plan, to_csv
+from sprint2_features import setup_extensions, handle_extensions, prepare_plan
 from auth import (SESSION_COOKIE, SESSION_SECONDS, DUMMY_HASH, normal_email, valid_name,
                   valid_password, hash_password, verify_password, create_session,
                   get_user, revoke_session, login_limiter, register_limiter)
@@ -60,6 +61,7 @@ def init_db():
           course_id INTEGER NOT NULL REFERENCES courses(id), pages INTEGER NOT NULL,
           extracted TEXT NOT NULL, summary TEXT);
         ''')
+        setup_extensions(db)
 
 
 def clean_string(value, name, limit=200):
@@ -215,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site':
                 return self.send(403, {'error': 'Cross-site requests are not allowed.'})
         if method == 'GET' and not path.startswith('/api/'):
-            files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+            files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/sprint2_ui.js': ('sprint2_ui.js', 'text/javascript; charset=utf-8')}
             if path not in files:
                 return self.send(404, {'error': 'Page not found.'})
             name, mime = files[path]
@@ -271,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 return self.send(401, {'error': 'Please sign in to access your workspace.'})
             uid = user['id']
+            if handle_extensions(self, db, uid, method, path):
+                return
             if path == '/api/state' and method == 'GET':
                 return self.send(200, {
                     'courses': [dict(row) for row in db.execute('SELECT id,code,name,color FROM courses WHERE user_id=? ORDER BY code', (uid,))],
@@ -287,7 +291,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Study plan parameters must be numbers.')
                 tasks = [dict(t) for t in db.execute('SELECT * FROM tasks WHERE user_id=? ORDER BY due_date,id', (uid,))]
                 courses = [dict(c) for c in db.execute('SELECT * FROM courses WHERE user_id=?', (uid,))]
-                return self.send(200, study_plan(tasks, courses, days, minutes))
+                return self.send(200, prepare_plan(db, uid, days, minutes))
             if path == '/api/export/tasks.csv' and method == 'GET':
                 rows = db.execute('''SELECT t.title, c.code, t.kind, t.due_date, t.priority, t.notes, t.completed
                      FROM tasks t JOIN courses c ON t.course_id=c.id
@@ -303,11 +307,11 @@ class Handler(BaseHTTPRequestHandler):
                     minutes = int(query.get('minutes', ['90'])[0])
                 except ValueError:
                     raise ValueError('Study plan parameters must be numbers.')
-                plan = study_plan([dict(t) for t in db.execute('SELECT * FROM tasks WHERE user_id=?', (uid,))],
-                                  [dict(c) for c in db.execute('SELECT * FROM courses WHERE user_id=?', (uid,))], days, minutes)
-                csv_rows = [(r['date'], r['course'], r['title'], r['kind'], r['priority'],
-                             r['minutes'], r['due_date'], 'Yes' if r['overdue'] else 'No') for r in plan['sessions']]
-                return self.send(200, to_csv(['Study date', 'Course', 'Task', 'Type', 'Priority', 'Minutes', 'Due date', 'Overdue'], csv_rows), 'text/csv; charset=utf-8')
+                plan = prepare_plan(db, uid, days, minutes)
+                csv_rows = [(r['date'], r['start_time'], r['course'], r['title'], r['kind'], r['priority'],
+                             r['minutes'], r['due_date'], 'Yes' if r['overdue'] else 'No',
+                             'Yes' if r['customized'] else 'No') for r in plan['sessions']]
+                return self.send(200, to_csv(['Study date', 'Start time', 'Course', 'Task', 'Type', 'Priority', 'Minutes', 'Due date', 'Overdue', 'Customized'], csv_rows), 'text/csv; charset=utf-8')
             if path == '/api/courses' and method == 'POST':
                 b = self.json_body()
                 code, name = clean_string(b.get('code'), 'Course code', 20), clean_string(b.get('name'), 'Course name', 100)
